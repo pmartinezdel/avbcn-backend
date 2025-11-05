@@ -1,8 +1,8 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from werkzeug.security import generate_password_hash, check_password_hash
-import psycopg2
-import psycopg2.extras
+import psycopg
+import psycopg.extras
 import jwt
 import datetime
 import os
@@ -20,7 +20,7 @@ DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://user:password@localhost:5
 # CONEXIÓN A BD
 # ===============================
 def get_conn():
-    return psycopg2.connect(DATABASE_URL, sslmode="require")
+    return psycopg.connect(DATABASE_URL, sslmode="require")
 
 # ===============================
 # AUTH DECORADOR
@@ -69,7 +69,7 @@ def register():
         cur.close()
         conn.close()
         return jsonify({"message": "Usuario registrado con éxito"}), 200
-    except psycopg2.errors.UniqueViolation:
+    except psycopg.errors.UniqueViolation:
         return jsonify({"error": "El nombre de usuario ya existe"}), 400
     except Exception as e:
         print("❌ Error en registro:", e)
@@ -83,7 +83,7 @@ def login():
     contrasena = data.get("contrasena", "").strip()
 
     conn = get_conn()
-    cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+    cur = conn.cursor(cursor_factory=psycopg.extras.DictCursor)
     cur.execute("SELECT id, password_hash, is_admin FROM users WHERE username=%s", (nombre,))
     user = cur.fetchone()
     cur.close()
@@ -159,7 +159,7 @@ def status():
 @token_required
 def admin_get_questions(user_id):
     conn = get_conn()
-    cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+    cur = conn.cursor(cursor_factory=psycopg.extras.DictCursor)
     cur.execute("SELECT id, text, weight, active FROM questions ORDER BY id")
     data = [dict(row) for row in cur.fetchall()]
     cur.close()
