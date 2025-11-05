@@ -1,200 +1,146 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, render_template
 from flask_cors import CORS
-from werkzeug.security import generate_password_hash, check_password_hash
 import psycopg
-import psycopg.extras
-import jwt
-import datetime
 import os
+import datetime
 
-app = Flask(__name__)
-CORS(app)
-
-# ===============================
+# -------------------------------------------------------
 # CONFIGURACIÓN
-# ===============================
-app.config['SECRET_KEY'] = os.getenv("SECRET_KEY", "dev-secret-key")
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://user:password@localhost:5432/arbolvida")
+# -------------------------------------------------------
+app = Flask(__name__)
+CORS(app, origins="*")  # Puedes restringir a soldesable.com más adelante
 
-# ===============================
-# CONEXIÓN A BD
-# ===============================
-def get_conn():
-    return psycopg.connect(DATABASE_URL, sslmode="require")
+DATABASE_URL = os.getenv("DATABASE_URL")
+SECRET_KEY = os.getenv("SECRET_KEY", "sol_desable_arbol_vida_default")
 
-# ===============================
-# AUTH DECORADOR
-# ===============================
-def token_required(f):
-    from functools import wraps
-    @wraps(f)
-    def decorated(*args, **kwargs):
-        token = None
-        if 'Authorization' in request.headers:
-            token = request.headers['Authorization'].split(" ")[1]
-        if not token:
-            return jsonify({'error': 'Token ausente'}), 401
-        try:
-            data = jwt.decode(token, app.config['SECRET_KEY'], algorithms=["HS256"])
-            user_id = data['user_id']
-        except Exception:
-            return jsonify({'error': 'Token inválido'}), 401
-        return f(user_id, *args, **kwargs)
-    return decorated
+# -------------------------------------------------------
+# CONEXIÓN A LA BASE DE DATOS
+# -------------------------------------------------------
+def get_connection():
+    """Devuelve una conexión activa a la base de datos PostgreSQL."""
+    return psycopg.connect(DATABASE_URL)
 
-# ===============================
-# ENDPOINTS
-# ===============================
-
+# -------------------------------------------------------
+# PÁGINA PRINCIPAL
+# -------------------------------------------------------
 @app.route("/")
 def index():
-    return jsonify({"message": "API Árbol de la Vida funcionando."})
+    return render_template("index.html")
 
-# ---------- Registro ----------
-@app.route("/api/register", methods=["POST"])
-def register():
-    data = request.get_json(force=True)
-    nombre = data.get("nombre", "").strip()
-    contrasena = data.get("contrasena", "").strip()
-
-    if not nombre or not contrasena:
-        return jsonify({"error": "Faltan datos"}), 400
-
-    hashed = generate_password_hash(contrasena)
-    try:
-        conn = get_conn()
-        cur = conn.cursor()
-        cur.execute("INSERT INTO users (username, password_hash) VALUES (%s,%s)", (nombre, hashed))
-        conn.commit()
-        cur.close()
-        conn.close()
-        return jsonify({"message": "Usuario registrado con éxito"}), 200
-    except psycopg.errors.UniqueViolation:
-        return jsonify({"error": "El nombre de usuario ya existe"}), 400
-    except Exception as e:
-        print("❌ Error en registro:", e)
-        return jsonify({"error": "Error interno"}), 500
-
-# ---------- Login ----------
-@app.route("/api/login", methods=["POST"])
-def login():
-    data = request.get_json(force=True)
-    nombre = data.get("nombre", "").strip()
-    contrasena = data.get("contrasena", "").strip()
-
-    conn = get_conn()
-    cur = conn.cursor(cursor_factory=psycopg.extras.DictCursor)
-    cur.execute("SELECT id, password_hash, is_admin FROM users WHERE username=%s", (nombre,))
-    user = cur.fetchone()
-    cur.close()
-    conn.close()
-
-    if not user or not check_password_hash(user["password_hash"], contrasena):
-        return jsonify({"error": "Credenciales incorrectas"}), 401
-
-    token = jwt.encode({
-        "user_id": user["id"],
-        "is_admin": user["is_admin"],
-        "exp": datetime.datetime.utcnow() + datetime.timedelta(hours=6)
-    }, app.config['SECRET_KEY'], algorithm="HS256")
-
-    return jsonify({"token": token, "usuario_id": user["id"], "is_admin": user["is_admin"]}), 200
-
-# ---------- Participar ----------
-@app.route("/api/answer", methods=["POST"])
-@token_required
-def answer(user_id):
-    data = request.get_json(force=True)
-    answers = data.get("answers", {})  # {question_id: value}
-
-    if not answers:
-        return jsonify({"error": "No se han recibido respuestas"}), 400
-
-    try:
-        conn = get_conn()
-        cur = conn.cursor()
-        for qid, value in answers.items():
-            cur.execute(
-                "INSERT INTO answers (user_id, question_id, value, created_at) VALUES (%s,%s,%s,NOW())",
-                (user_id, qid, value)
-            )
-        conn.commit()
-        cur.close()
-        conn.close()
-        return jsonify({"message": "Respuestas registradas"}), 200
-    except Exception as e:
-        print("❌ Error en answer:", e)
-        return jsonify({"error": "Error interno"}), 500
-
-# ---------- Estado general del árbol ----------
+# -------------------------------------------------------
+# ENDPOINT DE ESTADO DEL ÁRBOL
+# -------------------------------------------------------
 @app.route("/api/status", methods=["GET"])
 def status():
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("SELECT COUNT(DISTINCT user_id) FROM answers")
-    total_participantes = cur.fetchone()[0]
+    """Devuelve el estado de vitalidad del árbol y número de participantes."""
+    try:
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT COUNT(DISTINCT usuario_id), COALESCE(AVG((aire + ruido + limpieza)/3), 0) FROM respuestas;")
+                row = cur.fetchone()
+                participantes = row[0] or 0
+                vitalidad = float(row[1]) if row[1] is not None else 0.0
+        return jsonify({
+            "participantes": participantes,
+            "vitalidad": round(vitalidad, 2)
+        })
+    except Exception as e:
+        print(f"❌ Error en /api/status: {e}")
+        return jsonify({"error": "Error al obtener el estado del árbol"}), 500
 
-    cur.execute("""
-        SELECT q.text, AVG(a.value), q.weight
-        FROM questions q
-        LEFT JOIN answers a ON a.question_id = q.id
-        WHERE q.active = TRUE
-        GROUP BY q.id
-    """)
-    resultados = cur.fetchall()
-    cur.close()
-    conn.close()
+# -------------------------------------------------------
+# REGISTRO DE USUARIO
+# -------------------------------------------------------
+@app.route("/api/registrar", methods=["POST"])
+def registrar():
+    """Registra un nuevo usuario con nombre y contraseña."""
+    try:
+        data = request.get_json(force=True)
+        nombre = data.get("nombre", "").strip()
+        contrasena = data.get("contrasena", "").strip()
 
-    if not resultados:
-        return jsonify({"total": total_participantes, "vitality": 0, "metrics": []})
+        if not nombre or not contrasena:
+            return jsonify({"error": "Nombre y contraseña requeridos"}), 400
 
-    sum_w = sum([r[2] for r in resultados])
-    vitality = sum([(r[1] or 0) * r[2] for r in resultados]) / sum_w if sum_w else 0
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                # Evitar duplicados
+                cur.execute("SELECT id FROM usuarios WHERE nombre = %s;", (nombre,))
+                if cur.fetchone():
+                    return jsonify({"error": "El usuario ya existe"}), 400
 
-    metrics = [{"question": r[0], "avg": r[1] or 0, "weight": r[2]} for r in resultados]
-    return jsonify({"total": total_participantes, "vitality": round(vitality, 2), "metrics": metrics})
+                cur.execute(
+                    "INSERT INTO usuarios (nombre, contrasena) VALUES (%s, %s);",
+                    (nombre, contrasena)
+                )
+                conn.commit()
 
-# ---------- Admin: CRUD preguntas ----------
-@app.route("/api/admin/questions", methods=["GET"])
-@token_required
-def admin_get_questions(user_id):
-    conn = get_conn()
-    cur = conn.cursor(cursor_factory=psycopg.extras.DictCursor)
-    cur.execute("SELECT id, text, weight, active FROM questions ORDER BY id")
-    data = [dict(row) for row in cur.fetchall()]
-    cur.close()
-    conn.close()
-    return jsonify(data)
+        return jsonify({"message": f"Usuario {nombre} registrado correctamente."}), 200
 
-@app.route("/api/admin/questions", methods=["POST"])
-@token_required
-def admin_add_question(user_id):
-    data = request.get_json(force=True)
-    text = data.get("text", "")
-    weight = float(data.get("weight", 1.0))
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("INSERT INTO questions (text, weight, active) VALUES (%s,%s,TRUE)", (text, weight))
-    conn.commit()
-    cur.close()
-    conn.close()
-    return jsonify({"message": "Pregunta añadida"})
+    except Exception as e:
+        print(f"❌ Error en /api/registrar: {e}")
+        return jsonify({"error": "Error interno del servidor"}), 500
 
-@app.route("/api/admin/questions/<int:qid>", methods=["PUT"])
-@token_required
-def admin_edit_question(user_id, qid):
-    data = request.get_json(force=True)
-    text = data.get("text")
-    weight = float(data.get("weight", 1.0))
-    active = data.get("active", True)
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("UPDATE questions SET text=%s, weight=%s, active=%s WHERE id=%s",
-                (text, weight, active, qid))
-    conn.commit()
-    cur.close()
-    conn.close()
-    return jsonify({"message": "Pregunta actualizada"})
+# -------------------------------------------------------
+# LOGIN DE USUARIO
+# -------------------------------------------------------
+@app.route("/api/login", methods=["POST"])
+def login():
+    """Verifica credenciales del usuario."""
+    try:
+        data = request.get_json(force=True)
+        nombre = data.get("nombre", "").strip()
+        contrasena = data.get("contrasena", "").strip()
 
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT id FROM usuarios WHERE nombre = %s AND contrasena = %s;", (nombre, contrasena))
+                user = cur.fetchone()
+
+        if user:
+            return jsonify({"message": f"Bienvenido {nombre}", "usuario_id": user[0]}), 200
+        else:
+            return jsonify({"error": "Credenciales incorrectas"}), 401
+
+    except Exception as e:
+        print(f"❌ Error en /api/login: {e}")
+        return jsonify({"error": "Error interno del servidor"}), 500
+
+# -------------------------------------------------------
+# ENVÍO DE RESPUESTAS
+# -------------------------------------------------------
+@app.route("/api/answer", methods=["POST"])
+def answer():
+    """Recibe respuestas del usuario y actualiza vitalidad."""
+    try:
+        data = request.get_json(force=True)
+        usuario_id = data.get("usuario_id")
+        aire = int(data.get("aire", 0))
+        ruido = int(data.get("ruido", 0))
+        limpieza = int(data.get("limpieza", 0))
+        fecha = datetime.date.today().isoformat()
+
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                # Impedir respuestas duplicadas el mismo día
+                cur.execute("SELECT id FROM respuestas WHERE usuario_id = %s AND fecha = %s;", (usuario_id, fecha))
+                if cur.fetchone():
+                    return jsonify({"error": "Ya has participado hoy"}), 400
+
+                cur.execute(
+                    "INSERT INTO respuestas (usuario_id, aire, ruido, limpieza, fecha) VALUES (%s, %s, %s, %s, %s);",
+                    (usuario_id, aire, ruido, limpieza, fecha)
+                )
+                conn.commit()
+
+        return jsonify({"message": "Respuestas registradas correctamente"}), 200
+
+    except Exception as e:
+        print(f"❌ Error en /api/answer: {e}")
+        return jsonify({"error": "Error interno del servidor"}), 500
+
+# -------------------------------------------------------
+# MAIN
+# -------------------------------------------------------
 if __name__ == "__main__":
-    app.run(debug=True)
+    app.run(host="0.0.0.0", port=5000, debug=True)
